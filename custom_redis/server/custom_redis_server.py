@@ -1,34 +1,47 @@
 # -*- coding:utf-8 -*-
-"""redis_server"""
+"""
+redis server
+主线程使用select进程socket监听和任务处理
+守护线线程用来持久化数据和删除过期key
+"""
 import os
+import sys
 import time
 import errno
 import socket
 import select
+import logging
 import fnmatch
 import traceback
+from logging import handlers
 
 from argparse import ArgumentParser
-from threading import Thread
+from threading import Thread, RLock
 
 from multi_thread_closing import MultiThreadClosing
 
 from errors import MethodNotExist, ClientClosed
-from utils import stream_wrapper
+from utils import stream_wrapper, main_cmd_wrapper
 from default_data_types import *
 
 
-class CustomRedis(MultiThreadClosing):
+class CustomRedis(MultiThreadClosing, DataStore):
+
     name = "redis_server"
     default = {"str": StrStore, "hash": HashStore, "set": SetStore, "zset": ZsetStore, "list": ListStore}
 
-    def __init__(self, host, port):
+    def __init__(self, host, port, **kwargs):
         MultiThreadClosing.__init__(self)
+        self.meta = kwargs
         self.host = host
         self.port = port
+        # 所有数据类型
         self.data_type = {}
+        # 所有数据实例
         self.datas = {}
+        # 所有数据的过期时间
         self.expire_keys = {}
+        self.lock = RLock()
         self.open()
         self.data_type.update(self.default)
 
@@ -39,13 +52,15 @@ class CustomRedis(MultiThreadClosing):
         if os.path.exists("redis_data.db"):
             lines = open("redis_data.db").read().split("fdfsafafdsfsfdsfafdff")
             if lines:
+                self.logger.info("load datas...")
                 for line in lines:
                     self.load(line)
 
     def load(self, line):
+        # 加载数据类型
         try:
             if line:
-                key, expire_time, val = line.split("    ")
+                key, expire_time, val = line.split("1qazxsw23edc")
                 val = pickle.loads(val)
                 if len(self.data_type) < 2:
                     cls = self.data_type.values()[0].loads(val)
@@ -62,6 +77,7 @@ class CustomRedis(MultiThreadClosing):
             self.logger.error(traceback.format_exc())
 
     def __getattr__(self, item):
+        # 遍历所有数据类型，找到数据类型对应方法并返回
         for k, v in self.data_type.items():
             attr = getattr(v, item, None)
             if attr:
@@ -70,24 +86,33 @@ class CustomRedis(MultiThreadClosing):
 
     def start(self):
         self.setup()
-        daemaon_thread = Thread(target=self.poll)
-        daemaon_thread.setDaemon(True)
-        daemaon_thread.start()
+        daemon_thread = Thread(target=self.poll)
+        daemon_thread.setDaemon(True)
+        daemon_thread.start()
         self.listen_request(self.host, self.port)
 
     def poll(self):
+        """删除过期的Key, 删除空集合及持久化数据的守护进程"""
+        t = time.time()
         while True:
+            # 每30秒持久化一次数据
+            if time.time()-t > 30:
+                t = time.time()
+                self.persist()
             for key in self.expire_keys.keys():
                 if self.expire_keys[key] < time.time():
                     del self.datas[key], self.expire_keys[key]
+            for key in self.datas.keys():
+                if not self.datas[key].data:
+                    del self.datas[key]
             time.sleep(1)
 
     def listen_request(self, host, port):
         """监听函数"""
-        self.logger.debug("listen  to %s:%s"%(host, port))
+        self.logger.info("listen  to %s:%s"%(host, port))
         server = socket.socket()
         server.bind((host, port))
-        server.listen(0)
+        server.listen(10)
         r_lst = {server: None}
         w_lst = {}
         # 若执行过程中出现异常r_lst中的server也被清掉，程序退出
@@ -98,22 +123,25 @@ class CustomRedis(MultiThreadClosing):
                     self.recv(r, w_lst, r_lst, server)
                 for w in writable:
                     self.send(w, w_lst, r_lst, None)
-                    # time.sleep(1)
         except select.error, e:
             if e.args[0] != 4:
                 raise
+        self.persist()
         self.logger.info("exit...")
 
     def stop(self, *args):
         self.alive = False
-        stream = open("redis_data.db", "w")
-        self.logger.info("persist datas...")
-        for key, val in self.datas.items():
-            stream.write(key)
-            stream.write('    %s' % self.expire_keys.get(key, ""))
-            stream.write('    ')
-            val.persist(stream)
-        stream.close()
+
+    def persist(self, stream=None):
+        self.lock.acquire()
+        with open("redis_data.db", "w") as stream:
+            self.logger.info("persist datas...")
+            for key, val in self.datas.items():
+                stream.write(key)
+                stream.write('1qazxsw23edc%s' % self.expire_keys.get(key, ""))
+                stream.write('1qazxsw23edc')
+                val.persist(stream)
+        self.lock.release()
 
     @stream_wrapper
     def send(self, w, w_lst, r_lst, server):
@@ -138,7 +166,11 @@ class CustomRedis(MultiThreadClosing):
                 key, val = data.split("<->")
                 # 根据指令生成item返回结果
                 try:
-                    item = (getattr(self.datas.get(key, None), cmd, None) or getattr(self, cmd))(key, val, self)
+                    method = getattr(self.datas.get(key, None), cmd, None) or getattr(self, cmd)
+                    if key in self.datas and self.datas[key].__class__ != method.im_class:
+                        item = "503#-*-#Type Not Format#-*-#\r\n\r\n"
+                    else:
+                        item = method(key, val, self)
                 except MethodNotExist:
                     item = "404#-*-#Method Not Found#-*-#\r\n\r\n"
                 # 将socket保存在w_lst中，并将keep-alive 标志保存在其val中
@@ -162,18 +194,24 @@ class CustomRedis(MultiThreadClosing):
         self.logger.info("received massage is %s" % (msg or None))
         return msg
 
+    @main_cmd_wrapper
     def keys(self, k, v, instance):
         return "%s#-*-#%s#-*-#%s\r\n\r\n" % ("200", "success",
                                      json.dumps(filter(lambda x: fnmatch.fnmatch(x, k), self.datas.keys())))
 
+    @main_cmd_wrapper
     def expire(self, k, v, instance):
-        self.expire_keys[k] = int(time.time() + int(v))
-        return "200#-*-#success#-*-#\r\n\r\n"
+        if k in self.datas:
+            self.expire_keys[k] = int(time.time() + int(v))
+            return "200#-*-#success#-*-#\r\n\r\n"
+        raise KeyError(k)
 
+    @main_cmd_wrapper
     def type(self, k, v, instance):
         data = self.datas[k]
         return "200#-*-#success#-*-#%s\r\n\r\n"%data.__class__.__name__[:-5].lower()
 
+    @main_cmd_wrapper
     def ttl(self, k, v, instance):
         expire = self.expire_keys.get(k)
         if expire:
@@ -182,6 +220,7 @@ class CustomRedis(MultiThreadClosing):
             expire = -1
         return "200#-*-#success#-*-#%d\r\n\r\n" % expire
 
+    @main_cmd_wrapper
     def delete(self, k, v, instance):
         try:
             del self.datas[k]
@@ -189,6 +228,7 @@ class CustomRedis(MultiThreadClosing):
             pass
         return "200#-*-#success#-*-#\r\n\r\n"
 
+    @main_cmd_wrapper
     def flushall(self, k, v, instance):
         self.datas = {}
         return "200#-*-#success#-*-#\r\n\r\n"
@@ -196,14 +236,28 @@ class CustomRedis(MultiThreadClosing):
     @classmethod
     def parse_args(cls):
         parser = ArgumentParser()
-        parser.add_argument("--host", dest="host", help="host", default="127.0.0.1")
-        parser.add_argument("-p", "--port", type=int, dest="port", help="port", default=7777)
+        parser.add_argument("--host", help="host", default="127.0.0.1")
+        parser.add_argument("-p", "--port", type=int, help="port", default=6379)
+        parser.add_argument("-lf", "--log-file", action="store_true", help="log to file, else log to stdout. " )
+        parser.add_argument("-ld", "--log-dir", default=".")
+        parser.add_argument("-ll", "--log-level", default="DEBUG", choices=["DEBUG", "INFO", "WARN", "ERROR", "CRITICAL"])
+        parser.add_argument("--log-format", default="'%(asctime)s [%(name)s] %(levelname)s: %(message)s'")
         return cls(**vars(parser.parse_args()))
 
 
 def start_server():
     cr = CustomRedis.parse_args()
-    cr.set_logger()
+    logger = logging.getLogger(cr.name)
+    logger.setLevel(getattr(logging, cr.meta.get("log_level")))
+    if cr.meta.get("log_file"):
+        handler = handlers.RotatingFileHandler(os.path.join(cr.meta.get("log_dir"),
+                                                            "%s.log"%cr.name), maxBytes=10240000, backupCount=5)
+    else:
+        handler = logging.StreamHandler(sys.stdout)
+    formater = logging.Formatter(cr.meta.get("log_format"))
+    handler.setFormatter(formater)
+    logger.addHandler(handler)
+    cr.set_logger(logger)
     cr.start()
 
 

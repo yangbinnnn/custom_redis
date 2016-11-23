@@ -46,6 +46,7 @@ def stream_wrapper(func):
 
 
 def cmd_wrapper(func):
+
     @wraps(func)
     def wrapper(*args):
 
@@ -62,6 +63,21 @@ def cmd_wrapper(func):
             return self.format_response(502, "Empty", "")
         except Exception as e:
             self.logger.error(traceback.format_exc())
-            return self.format_response(503, e.__class__.__name__.lower(), v)
+            return self.format_response(503, "%s:%s"%(e.__class__.__name__.lower(), e), v)
+
+    return wrapper
+
+
+def main_cmd_wrapper(func):
+
+    @wraps(func)
+    def wrapper(*args):
+
+        self, k, v, instance = args
+        try:
+            return func(*args)
+        except Exception as e:
+            self.logger.error(traceback.format_exc())
+            return self.format_response(503, "%s:%s"%(e.__class__.__name__.lower(), e), v)
 
     return wrapper

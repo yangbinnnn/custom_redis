@@ -48,7 +48,7 @@ class ZsetStore(DataStore):
 
     @cmd_wrapper
     def zpop(self, k, v, instance):
-        return self.data.zpop()
+        return self.data.zpop(v)
 
     @cmd_wrapper
     def zcard(self, k, v, instance):
@@ -114,15 +114,25 @@ class SetStore(DataStore):
         self.data.add(v)
 
     @cmd_wrapper
-    def smembers(self, k, v, instance):
+    def scard(self, k, v, instance):
         return len(self.data)
 
     @cmd_wrapper
-    def remove(self, k, v, instance):
-        self.data.remove(v)
+    def smembers(self, k, v, instance):
+        return json.dumps(list(self.data))
 
     @cmd_wrapper
-    def rchoice(self, k, v, instance):
+    def srem(self, k, v, instance):
+        values = self._parses(v)
+        for value in values:
+            self.data.remove(value)
+
+    @cmd_wrapper
+    def sismember(self, k, v, instance):
+        return v in self.data
+
+    @cmd_wrapper
+    def srchoice(self, k, v, instance):
         return random.choice(list(self.data))
 
 

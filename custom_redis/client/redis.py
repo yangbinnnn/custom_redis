@@ -5,11 +5,13 @@ import time
 import errno
 import argparse
 
+from copy import deepcopy
 from socket import socket
 
 from functions import CMD_DICT
 from errors import RedisArgumentError, RedisError
-from utils import SafeList, func_name_wrapper, handle_safely, default_recv, default_send
+from utils import SafeList, func_name_wrapper, handle_safely,\
+    default_recv, default_send, escape, unescape
 
 FORMAT = "%s#-*-#%s#-*-#1"
 
@@ -40,7 +42,7 @@ class Redis(object):
         args = SafeList(args)
         func_name = kwargs["_name"]
         properties = CMD_DICT[func_name]
-        default_value = properties.get("default", [])
+        default_value = deepcopy(properties.get("default", []))
         try:
             arguments = []
             for arg in properties["args"]:
@@ -51,10 +53,16 @@ class Redis(object):
                         kwarg = default_value.pop(0)
                 arguments.append(kwarg)
         except IndexError:
-            raise RedisArgumentError("haven't got enough arguments")
+            sub = ""
+            args = properties.get("args")
+            default_args = SafeList(deepcopy(properties.get("default", [])))
+            error_msg = "%%s haven't got enough arguments, need %s argument%s named %%s. "%(len(args), "" if len(args) == 1 else "s")
+            for arg in reversed(args):
+                sub = "%s%s"%(arg, (": default %s, "%default_args.pop(-1) if default_args else ", ")) + sub
+            raise RedisArgumentError(error_msg%(func_name, sub[:-2]))
         if args:
             arguments += args
-        return self._parse_result(FORMAT % (func_name, properties.get("send", default_send)(*arguments)), properties)
+        return self._parse_result(FORMAT % (func_name, "%s<->%s"%escape(properties.get("send", default_send)(*arguments))), properties)
 
     def _parse_result(self, buf, properties={}):
         count = 0
@@ -78,28 +86,28 @@ class Redis(object):
         code, info, data = a
         data = data[:-4]
         if code == "200":
-            return handle_safely(properties.get("recv", default_recv))(data)
+            return handle_safely(properties.get("recv", default_recv))(unescape(data))
         elif code == "502":
             return properties.get("result", data)
         else:
-            raise RedisError("%s:%s, %s"%(code, info, data))
+            raise RedisError("%s:%s, data: %s"%(code, info, data))
 
-    def keys(self, pattern="*"):
-        return self._parse_result(FORMAT%("keys", "%s<->"%pattern), {"recv":json.loads})
+    def keys(self, pattern="*", *args):
+        return self._parse_result(FORMAT%("keys", "%s<->%s"%escape((pattern, ""))), {"recv":json.loads})
 
-    def type(self, key):
-        return self._parse_result(FORMAT % ("type", "%s<->" % key))
+    def type(self, key, *args):
+        return self._parse_result(FORMAT % ("type", "%s<->%s" % escape((key, ""))))
 
-    def delete(self, key):
-        return self._parse_result(FORMAT % ("delete", "%s<->" % key))
+    def delete(self, key, *args):
+        return self._parse_result(FORMAT % ("delete", "%s<->%s" % escape((key, ""))))
 
-    def expire(self, key, seconds):
-        return self._parse_result(FORMAT % ("expire", "%s<->%s" % (key, seconds)))
+    def expire(self, key, seconds, *args):
+        return self._parse_result(FORMAT % ("expire", "%s<->%s" % escape((key, seconds))))
 
-    def ttl(self, key):
-        return self._parse_result(FORMAT % ("ttl", "%s<->" % key))
+    def ttl(self, key, *args):
+        return self._parse_result(FORMAT % ("ttl", "%s<->%s" % escape((key, ""))))
 
-    def flushall(self):
+    def flushall(self, *args):
         return self._parse_result(FORMAT % ("flushall", "<->"))
 
 
